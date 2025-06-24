@@ -16,9 +16,16 @@ const redis = new Redis(process.env.REDIS_URL);
 const eventHandlers = {};
 function on(event, handler) { eventHandlers[event] = handler; }
 
-const users = new Map(); // ws => { uuid }
+const users = new Map();
 let contestants = [];
 let currentRound = 0;
+let intermission = false;
+let waitingForNextRound = false;
+let takeItOff = false;
+
+function broadcastState() {
+  broadcast(wss, "state_update", { intermission, waitingForNextRound, takeItOff });
+}
 
 // Load all contestants (teachers and decoys)
 async function loadContestants() {
@@ -109,6 +116,9 @@ wss.on('connection', (ws) => {
         contestants,
         currentRound,
         isAdmin: ws.isAdmin,
+        intermission,
+        waitingForNextRound,
+        takeItOff
       });
       return;
     }
@@ -160,6 +170,63 @@ on('reset_votes', async (ws) => {
       await redis.del(`votes:round:${round}:contestant:${c.id}`);
     }
   }
+  broadcastVoteCounts();
+});
+
+on("toggle_intermission", async (ws) => {
+  if (!ws.isAdmin) {
+    send(ws, "error", { message: "Unauthorized" });
+    return;
+  }
+  intermission = !intermission;
+  broadcastState();
+});
+
+on("toggle_waiting", async (ws) => {
+  if (!ws.isAdmin) {
+    send(ws, "error", { message: "Unauthorized" });
+    return;
+  }
+  waitingForNextRound = !waitingForNextRound;
+  broadcastState();
+});
+
+on("toggle_take_it_off", async (ws) => {
+  if (!ws.isAdmin) {
+    send(ws, "error", { message: "Unauthorized" });
+    return;
+  }
+  takeItOff = !takeItOff;
+  broadcastState();
+});
+
+on("clear_all", async (ws) => {
+  if (!ws.isAdmin) {
+    send(ws, "error", { message: "Unauthorized" });
+    return;
+  }
+
+  // Clear all votes and round data from Redis
+  const keys = await redis.keys("votes:round:*");
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
+
+  // Reset round and all state
+  currentRound = 0;
+  intermission = false;
+  waitingForNextRound = false;
+  takeItOff = false;
+
+  await loadContestants();
+
+  // Broadcast reset to all clients
+  broadcast(wss, "reset_all", {
+    currentRound,
+    intermission,
+    waitingForNextRound,
+    takeItOff,
+  });
   broadcastVoteCounts();
 });
 
